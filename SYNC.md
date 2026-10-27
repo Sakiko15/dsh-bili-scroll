@@ -118,7 +118,7 @@ dsh plugin --profile web add file:D:\dsh_prj\prj1\ts1\dsh-bili-scroll
 
 不经过 git 构建，改完源码重启 dsh 就生效。
 
-### 方案 C：继续用 npm 包 + pnpm patch（当前机器就是这么跑的）
+### 方案 C：继续用 npm 包 + pnpm patch
 
 如果只是想在现有安装上叠这些修复、不换安装来源，用 `pnpm patch` 把改动做成补丁：
 
@@ -130,7 +130,63 @@ pnpm patch-commit "<临时目录>"
 ```
 
 补丁会写进 `pnpm-workspace.yaml` 的 `patchedDependencies`，升级插件时会被覆盖、需要重打。
-本机当前用的就是这条（`patches/dsh-bili-scroll@2.2.2.patch`）。
+
+> ⚠️ 方案 B 和 C **不要同时用** —— 会双重打补丁。切到 B 之前先把 `patchedDependencies`
+> 里 `dsh-bili-scroll` 那行删掉。
+
+---
+
+## 改了 fork 源码之后，怎么让它生效
+
+`file:` 依赖是**复制**模式，不是符号链接。实测（pnpm 11.21.0）：
+
+| 做法 | 结果 |
+|---|---|
+| `pnpm install` | ❌ 不更新（pnpm 认为依赖没变） |
+| `pnpm install --force` | ❌ 不更新 |
+| **删掉副本再装** | ✅ 有效 |
+
+所以改完源码的完整流程是：
+
+```bash
+# 1. 在 D:\dsh_prj\prj1\ts1\dsh-bili-scroll 里改代码
+# 2. 删掉副本
+rm -rf ~/.dsh/profiles/web/node_modules/dsh-bili-scroll
+#    Windows: Remove-Item -Recurse -Force "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-bili-scroll"
+# 3. 重装
+cd ~/.dsh/profiles/web && pnpm install
+# 4. 重启 dsh
+```
+
+想省掉 2~3 步，可以把依赖改成 `link:`（符号链接，改完只需重启）：
+
+```json
+"dsh-bili-scroll": "link:D:\\dsh_prj\\prj1\\ts1\\dsh-bili-scroll"
+```
+
+代价是源码目录不能删、不能挪，否则插件直接挂。
+
+---
+
+## ⚠️ 用 PowerShell 改 JSON 配置文件会踩 BOM 的坑
+
+这台机器上遇到过：用 `ConvertTo-Json | Set-Content -Encoding UTF8` 改
+`~/.dsh/bili-duty/config.json`，Windows PowerShell 5 的 `-Encoding UTF8` 会在开头写
+`EF BB BF`，于是 `JSON.parse` 直接抛错，整份配置被当成读不到 ⇒ **所有设置静默退回默认值**
+（`pythonPath` 变 `'python'`、`headlessProfile` 变 `'headless'`），现象只有"怎么改都不生效"。
+
+`mine` 分支已经修了（剥 BOM + 解析失败时记日志），但**改这些文件时仍然建议**：
+
+```powershell
+# 用这个写法（无 BOM）
+[IO.File]::WriteAllText($path, $json, [Text.UTF8Encoding]::new($false))
+```
+
+或者干脆用插件自己的工具改配置，别手改文件：
+
+```
+bili_config({ "perDay": 5 })
+```
 
 ## 验证
 

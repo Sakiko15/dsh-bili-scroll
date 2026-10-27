@@ -766,7 +766,18 @@ function reportMeta() {
     description: '**立刻跑一轮**（不等窗口）：起一个 headless 会话，把 duty.md 交给它去刷、写报告。'
       + '适合"我现在就想看一份"的场合。',
     parameters: {},
-    async execute() { const r = runDuty('manual'); return { ok: true, ...r } },
+    // 🔴 2026-10-27 修（实测这一轮私信一条都没发出去）：`warmDmUid()` 只在 HTTP 端点
+    //    `/api/bili-duty/run` 里调过，**工具这条路没调** ⇒ `dmUidCache` 一直是 0 ⇒
+    //    `dmDegraded` 成立 ⇒ 提示词里写「⛔ 这一轮什么都不会发出去」，模型只能如实记"没发"。
+    //    结果就是：点「现在跑一轮」按钮（走 HTTP）私信正常，用 MCP 工具 bili_run 触发就永远
+    //    发不出私信 —— 同一个动作两条路，行为必须一致。这里补上同样的准备。
+    async execute() {
+      if (cfg.dmMode !== 'off' && !(Number(cfg.dmUid) > 0)) {
+        try { await warmDmUid() } catch (e) { log('跑一轮前查私信 UID 出错（已兜住）：' + String(e?.message ?? e)) }
+      }
+      const r = runDuty('manual')
+      return { ok: true, ...r }
+    },
   })
 
   tool({
@@ -1284,7 +1295,11 @@ function reportMeta() {
     list.push('duty_paths', 'duty_report_append', 'duty_seen_append', 'duty_digest_append', 'duty_seen_recent')
     // ⭐ 2026-10-25：转写改成 job 模型（start / result）—— 慢活不该占住一次工具调用；
     //    老的 bili_transcribe 还留着（仍能用，但它会等到跑完，别在一轮里连用两条）
-    if (cfg.asrInstalled !== false) list.push('bili_transcribe', 'bili_transcribe_start', 'bili_transcribe_result')
+    // 🔴 2026-10-27 修：`cfg.asrInstalled` 这个字段**从来没人写过**（不在 Config schema 里、
+    //    config.json 里也没有）⇒ 恒为 `undefined` ⇒ `!== false` 恒真 ⇒ 使用者明明把
+    //    `transcribe` 关着，三个转写工具照样每一轮都下发（实测工具清单里 18 个含它们）。
+    //    这里改成看真正的开关 `cfg.transcribe`；`asrInstalled === false` 作为"装失败就别给"的兜底保留。
+    if (cfg.transcribe && cfg.asrInstalled !== false) list.push('bili_transcribe', 'bili_transcribe_start', 'bili_transcribe_result')
     // ⭐⭐ 2.0.4（第三方体检第 3 条）：**"只发私信"时评论通道必须硬关** —— 以前只看 autoComment，
     //    用户以前开过自动评论、后来切到"只私信"，那个 true 还在 config 里 ⇒ 评论工具照样下发 ✗
     const dmOnly = String(cfg.dmMode || '').trim() === 'only'
@@ -1517,7 +1532,10 @@ function reportMeta() {
           log(`这一轮没跑（${why}）：另一个宿主正在跑（pid=${lock.pid}）⇒ 让给它`)
           return false
         }
-        if (!fresh) log('运行锁已过期（' + Math.round((Date.now() - Number(lock.ts)) / 60000) + ' 分钟前那个），这一轮照跑')
+        // 🔴 2026-10-27 修：`{"pid":0,"ts":0}` 这种**空锁**（从没占过 / 被手工清过）以前也算
+        //    "过期锁"，于是日志里出现「运行锁已过期（29884816 分钟前那个）」—— 那是 57 年前，
+        //    纯噪音、还容易让人以为出了大事。没有 ts 就当没锁，静默照跑。
+        if (Number(lock.ts) > 0 && !fresh) log('运行锁已过期（' + Math.round((Date.now() - Number(lock.ts)) / 60000) + ' 分钟前那个），这一轮照跑')
       }
       writeFileSync(runLockFile, JSON.stringify({ pid: process.pid, ts: Date.now(), why }), 'utf8')
       return true
@@ -1647,7 +1665,10 @@ function reportMeta() {
     child.on('error', (e) => { releaseRunLock(); log(`刷B站起不来：${e?.message ?? e}`) })
     // ⭐ 起不来/被杀掉也要把锁放开，否则之后每一轮都会被判成'上一轮还没结束' ✗
     child.on('close', () => { if (dutyChild === child) dutyChild = null })
-    return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
+    // 🔴 2026-10-27 修：报的是 `cfg.headlessProfile`（**配置里写的**），不是真正 spawn 用的
+    //    `effectiveProfile()` ⇒ 配置里填 `headless` 时日志说"用 headless 跑的"，实际跑的是
+    //    bili-duty（或反过来），排查时会被这句误导。
+    return { started: true, why, profile: effectiveProfile(), cwd, log: logFile }
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
@@ -1677,6 +1698,12 @@ function reportMeta() {
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
         bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
+        // 🔴 2026-10-27 修：`warmDmUid()` 以前只在 HTTP 端点里调过 ⇒ **峰谷自动刷这一条路**
+        //    和 MCP 工具 bili_run 都没调 ⇒ dmUidCache=0 ⇒ 私信降级成「什么都不会发出去」。
+        //    定时器这里是同步的，就先把它踢起来（它内部自己兜异常），紧接着照常开跑。
+        if (cfg.dmMode !== 'off' && !(Number(cfg.dmUid) > 0)) {
+          Promise.resolve(warmDmUid()).catch((e) => log('定时这一跳查私信 UID 出错（已兜住）：' + String(e?.message ?? e)))
+        }
         runDuty(`window:${k}`)
         return
       }
@@ -1840,6 +1867,8 @@ function reportMeta() {
 
   let dmTimer = null
   let dmBusy = false
+  // 🔴 2026-10-27：「只回登录账号自己」那句配置提示，每个进程只说一次（见下面的用法）
+  let saidDmOwnerHint = false
   // ⭐ 2.0.5：一条私信回复没跑完时，不要让下一条进来（不然两个进程抢同一个会话，DSH 会报 "already owned by an active write handle"）
   let dmReplyRunning = false
   async function dmTick() {
@@ -1876,7 +1905,11 @@ function reportMeta() {
       }
       if (String(cfg.mentionName || '').trim()) {
         const configured = Number(cfg.dmOwnerUid) > 0
-        if (!configured) {
+        // 🔴 2026-10-27 修：这一跳**每分钟都跑**，而这句是"配置状态"不是"新事件" ⇒
+        //    以前每 60 秒往 duty.log 写一行一模一样的话（实测一天不到就 50 行），
+        //    翻日志时真出事的那几行被淹掉。同一个进程只说一次。
+        if (!configured && !saidDmOwnerHint) {
+          saidDmOwnerHint = true
           log('私信监听：现在只回"登录账号自己"的私信；想回你大号的话，请在高级里填「只回谁的私信」= 你自己的 UID')
         }
       }
@@ -3012,7 +3045,14 @@ function reportMeta() {
 
   ctx.effect(() => () => { try { mcp?.stop() } catch { /* 收摊 */ } }, 'bili-duty: 收 MCP 子进程')
   try { ensureDutyProfile() } catch { /* 上面已记日志 */ }
-  if (dutyProfileState === 'ok') log('值班轮用最小权限 profile：bili-duty（无文件系统 / 无命令 / 无联网）')
-  else log('⚠️ 最小权限 profile 不可用（' + dutyProfileState + '）⇒ 值班轮仍用 headless（这一轮能力偏大）')
+  // 🔴 2026-10-27 修：这两行原来只看 `dutyProfileState`，于是无论使用者把 headlessProfile 指到
+  //    哪里（例如自己建的 `bili-duty-dz`），启动日志都照样说"值班轮用 bili-duty" —— 排查时被误导。
+  //    现在报**真正会 spawn 的那个**（effectiveProfile()）。
+  {
+    const real = effectiveProfile()
+    if (real === 'bili-duty' && dutyProfileState === 'ok') log('值班轮用最小权限 profile：bili-duty（无文件系统 / 无命令 / 无联网）')
+    else if (real === 'bili-duty') log('⚠️ 最小权限 profile 不可用（' + dutyProfileState + '）⇒ 值班轮仍用 headless（这一轮能力偏大）')
+    else log('值班轮用的 profile：' + real + '（设置页「高级 → headless profile」指定的）')
+  }
   log(`已挂载（家=${stateDir}，python=${cfg.pythonPath}，峰谷=${cfg.peakValley ? '开' : '关'}）`)
 }

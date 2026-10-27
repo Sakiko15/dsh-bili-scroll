@@ -1723,7 +1723,17 @@ function reportMeta() {
   //    才 spawn 一轮很小的任务去回一句。默认关 —— 它一开就会花 token，得用户自己点头。
   const dmSeenFile = join(stateDir, 'dm-seen.json')
   const dmQuotaFile = join(stateDir, 'dm-quota.json')
-  const readJsonFile = (f, dflt) => { try { return JSON.parse(readFileSync(f, 'utf8')) } catch { return dflt } }
+  // ⚠️ 2026-10-27：跟 lib/state.mjs 的 readJson 同一个坑 —— 以前 BOM 会让整份文件作废、
+  //    而且一声不响。这里也剥 BOM，并在"文件在但读不懂"时记一行。
+  const readJsonFile = (f, dflt) => {
+    let text
+    try { text = readFileSync(f, 'utf8') } catch { return dflt }
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+    try { return JSON.parse(text) } catch (e) {
+      log(`${f} 不是合法 JSON（已忽略，用默认值）：${e?.message ?? e}`)
+      return dflt
+    }
+  }
   const writeJsonFile = (f, obj) => { try { writeFileSync(f, JSON.stringify(obj, null, 2), 'utf8') } catch { /* 写不进去就下次再说 */ } }
   // ⭐ 2026-10-23（经主人拍板，回退我先前那版"加一个新字段"的做法）：
   //    **「@ 谁 / 私信给谁」那个框就是"我"** —— 它的本意就是"让它 @ 我"。

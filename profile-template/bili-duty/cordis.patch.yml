@@ -36,8 +36,6 @@
   disabled: true
 - id: jobs
   disabled: true
-- id: tool-ralph
-  disabled: true
 
 # ── 文件系统：读 / 写 / 搜 —— 一个都不留 ────────────────────────────────────
 - id: tool-fs
@@ -79,8 +77,6 @@
 - id: skill
   disabled: true
 - id: skill-filesystem
-  disabled: true
-- id: skill-badge
   disabled: true
 - id: tool-skill
   disabled: true

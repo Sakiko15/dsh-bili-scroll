@@ -1431,10 +1431,18 @@ function reportMeta() {
         const f = join(outDir, `${dayKey()}.md`)
         const block = '## 投递\n\n' + roundNotes.map((n) => '- ' + n).join('\n') + '\n'
         if (!existsSync(f)) { writeFileSync(f, `# 刷B站 · ${dayKey()}\n\n` + block, 'utf8'); return }
-        let cur = readFileSync(f, 'utf8')
-        const at = cur.indexOf('## 投递')
-        if (at >= 0) cur = cur.slice(0, at).replace(/\s*$/, '') + '\n'
-        writeFileSync(f, cur.replace(/\s*$/, '') + '\n' + block, 'utf8')
+        const cur = readFileSync(f, 'utf8')
+        // 🔴 2026-10-27 修（实测把整份报告删光）：原来用 `indexOf('## 投递')` —— **第一次出现**就切，
+        //    于是只要报告里**别处**有个 `## 投递`（上一轮的占位报告就带着一段），
+        //    模型这一轮追加的内容就全被切掉（实测 BV 计数 1 → 0，perDay 账本也跟着归零）。
+        // ⇒ 现在只删「**我们自己写的那种块**」：`## 投递` 紧跟一个纯 `- …` 列表。
+        //    删之前先数一遍 `### BV` 标题行，删完发现变少了就整份放弃（宁可多一段旧块，
+        //    也绝不删掉模型写的报告 —— 那是使用者真正要看的东西）。
+        const pickCount = (t) => new Set([...t.replace(/```[\s\S]*?```/g, '').matchAll(/^#{2,3}[ \t]*(BV[0-9A-Za-z]{10})/gm)].map((m) => m[1])).size
+        const before = pickCount(cur)
+        let next = cur.replace(/^## 投递[ \t]*\r?\n(?:\s*\r?\n)?(?:-[^\r\n]*(?:\r?\n|$))+/gm, '')
+        if (pickCount(next) !== before) next = cur
+        writeFileSync(f, next.replace(/\s*$/, '') + '\n' + block, 'utf8')
       } catch { /* 宁可没这段，也不能让这一轮挂掉 */ }
     }
 
@@ -1537,6 +1545,10 @@ function reportMeta() {
         dutyChild = null
       }
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
+    // 🔴 2026-10-27 修：`roundNotes` 是插件级数组，**以前从不清空** ⇒ 第 2 轮起会把上一轮的
+    //    「投递：只私信…」再写一遍（实测文件末尾出现两行重复），而且它跟 P0-1 的截断叠加
+    //    会把新一轮的报告删光。每开一轮先清空 —— 这些 note 只描述**当前这一轮**。
+    roundNotes.length = 0
     const dsh = resolveDsh()
     // ⭐ 找不到 dsh 就别硬跑：以前会退化成裸 `dsh` ⇒ spawn 失败、只留 exit 1 + 一串乱码 ✗
     if (dsh.missing) {
@@ -1593,19 +1605,33 @@ function reportMeta() {
       releaseRunLock()            // ⭐ 这一轮结束了，把锁放开（删不掉也没事，10 分钟自动过期）
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
+      // ⭐ 这一轮挑了几条：从今天的报告里数（上一轮挑的还在同一份文件里 ⇒ 数出来就是全天的账）
+      // 🔴 2026-10-27 修：**必须在 writeRoundNotesToReport 之前数**。以前是反过来的 ——
+      //    只要「投递」那一步把报告切短了，这里数出来就是 0 ⇒ `picked > prev` 不成立 ⇒
+      //    bumpState 从不执行 ⇒ state.json 根本没被创建、提示词里的 already 恒为 0、
+      //    perDay 闸门彻底失效（实测今天挑了 4 条，账本里仍是 0）。数完再写附加段落。
+      try {
+        const st = readJson(dutyStateFile, {})
+        const prev = st.day === dayKey() ? Number(st.picked || 0) : 0
+        const picked = countPickedToday()   // 报告是事实来源、state 只是兜底（跟闸门同一个算法）
+        if (picked > prev) { bumpState({ picked }); log(`今天挑到 ${picked} 条（上限 ${Number(cfg.perDay) || 0} 条）`) }
+        // 🔴 2026-10-27 修：`state.count`（= 界面上的 `ranToday`「今天跑了几轮」）以前**只有
+        //    峰谷定时那一条路**会 +1，手动点「现在跑一轮」（HTTP）或用 bili_run 工具跑都不加
+        //    ⇒ 明明跑过，界面永远显示 0 轮。这里手动跑完也记一笔。
+        //    ⚠️ 只给 `why === 'manual'` 加：定时那条路在 tick() 里**开跑前**就已经 +1 了，
+        //    在这里再加会重复计。
+        if (why === 'manual') {
+          const cur = readJson(dutyStateFile, {})
+          const base = cur.day === dayKey() ? Number(cur.count || 0) : 0
+          bumpState({ count: base + 1, lastRunAt: new Date().toISOString(), lastWhy: why })
+        }
+      } catch (e) { log(`数挑了几条时出错（不影响这一轮）：${e?.message ?? e}`) }
       try { writeRoundNotesToReport() } catch { /* 写不进去也不能炸 */ }
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
     if (code === 0 && Number(cfg.favFolderId) > 0) {
       favToday('auto').catch((error) => log('自动收藏出错（已兜住）：' + String(error?.message ?? error)))
     }
       rotateLogIfBig()            // ⭐ 日志别无声地长（三天 797KB ⇒ 一年约 100MB）
-      // ⭐ 这一轮挑了几条：从今天的报告里数（上一轮挑的还在同一份文件里 ⇒ 数出来就是全天的账）
-      try {
-        const st = readJson(dutyStateFile, {})
-        const prev = st.day === dayKey() ? Number(st.picked || 0) : 0
-        const picked = countPickedToday()   // 报告是事实来源、state 只是兜底（跟闸门同一个算法）
-        if (picked > prev) { bumpState({ picked }); log(`今天挑到 ${picked} 条（上限 ${Number(cfg.perDay) || 0} 条）`) }
-      } catch (e) { log(`数挑了几条时出错（不影响这一轮）：${e?.message ?? e}`) }
       // ⭐ 发完评论之后**过一会儿再核一次**（2026-10-16 加的「评论发出后复核」）：
       //    接口回"发送成功"≠ 公开可见（新号/风控会进审核）；而"不公开"时连 @ 通知都不会推 ⇒
       //    插件会以为发了、下一轮不再发 ⇒ 一条都没到人。等 90 秒再查，避免把"还在审核"误判成"没发出去"。

@@ -206,8 +206,11 @@ function reportMeta() {
       const m = b.match(/^###\s*(BV[0-9A-Za-z]+)/)
       if (!m) continue
       const bvid = m[1]
-      const tierM = b.match(/\*\*档位\*\*\s*[：:]\s*(值得看|可以看|不值当)/)
-      const whyM = b.match(/\*\*为什么值得\*\*\s*[：:]\s*([\s\S]*?)(?=\n\s*\*\*|$)/)
+      const tierM = b.match(/\*{0,2}档位\*{0,2}\s*[：:]\s*(值得看|可以看|不值当)/)
+      // 🔴 2026-10-27 修：原来死认 `**为什么值得**`（带星号），可章程只对「档位」要求星号，
+      //    模型写的是 `- 为什么值得：…` ⇒ 实测 4 条 why 全是空串，「它刷过的视频」里这栏永远空白。
+      //    现在 0–2 个星号都认；结尾也放宽到「下一个列表项 / 下一段 / 文件尾」。
+      const whyM = b.match(/\*{0,2}为什么值得\*{0,2}\s*[：:]\s*([\s\S]*?)(?=\n\s*(?:-|\*|#{1,6}\s)|$)/)
       map.set(bvid, {
         tier: tierM ? tierM[1] : "",
         why: whyM ? whyM[1].replace(/\s+/g, " ").trim().slice(0, 160) : "",
@@ -2542,7 +2545,9 @@ function reportMeta() {
           const m = /^###\s*(BV[0-9A-Za-z]+)/.exec(b.trim())
           if (!m) continue
           const bvid = m[1]
-          const title = (/\*\*标题\*\*\s*[：:]\s*(.+)/.exec(b) || [])[1] || bvid
+          // 🔴 2026-10-27 修：同上 —— 原来死认 `**标题**`，报告里写的是 `- 标题：`，
+          //    于是每张卡片标题都退化成了 BV 号（实测 4/4 全是 `# BV1pmHP63ENi`）。星号 0–2 个都认。
+          const title = (/\*{0,2}标题\*{0,2}\s*[：:]\s*(.+)/.exec(b) || [])[1] || bvid
           const day = dayKey()
           const out = join(notesDir, bvid + '-' + day + '.md')
           if (existsSync(out)) continue
